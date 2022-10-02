@@ -76,8 +76,6 @@ class LeggedRobot(BaseTask):
         self._prepare_reward_function()
         self.init_done = True
 
-        self.action_scale = self.cfg.control.action_scale
-
     def step(self, actions):
         """ Apply actions, simulate, call self.post_physics_step()
 
@@ -88,7 +86,6 @@ class LeggedRobot(BaseTask):
         self.actions = torch.clip(actions, -clip_actions, clip_actions).to(self.device)
         # step physics and render each frame
         self.render()
-        self.last_torques = self.torques
         for _ in range(self.cfg.control.decimation):
             self.torques = self._compute_torques(self.actions).view(self.torques.shape)
             self.gym.set_dof_actuation_force_tensor(self.sim, gymtorch.unwrap_tensor(self.torques))
@@ -365,7 +362,7 @@ class LeggedRobot(BaseTask):
             [torch.Tensor]: Torques sent to the simulation
         """
         #pd controller
-        actions_scaled = actions * self.action_scale
+        actions_scaled = actions * self.cfg.control.action_scale
         control_type = self.cfg.control.control_type
         if control_type=="P":
             torques = self.p_gains*(actions_scaled + self.default_dof_pos - self.dof_pos) - self.d_gains*self.dof_vel
@@ -508,8 +505,6 @@ class LeggedRobot(BaseTask):
         self.gravity_vec = to_torch(get_axis_params(-1., self.up_axis_idx), device=self.device).repeat((self.num_envs, 1))
         self.forward_vec = to_torch([1., 0., 0.], device=self.device).repeat((self.num_envs, 1))
         self.torques = torch.zeros(self.num_envs, self.num_actions, dtype=torch.float, device=self.device, requires_grad=False)
-        self.last_torques = torch.zeros(self.num_envs, self.num_actions, dtype=torch.float, device=self.device,
-                                   requires_grad=False)
         self.p_gains = torch.zeros(self.num_actions, dtype=torch.float, device=self.device, requires_grad=False)
         self.d_gains = torch.zeros(self.num_actions, dtype=torch.float, device=self.device, requires_grad=False)
         self.actions = torch.zeros(self.num_envs, self.num_actions, dtype=torch.float, device=self.device, requires_grad=False)
@@ -584,14 +579,14 @@ class LeggedRobot(BaseTask):
     def _create_heightfield(self):
         """ Adds a heightfield terrain to the simulation, sets parameters based on the cfg.
         """
-        hf_params = gymapi.HeightFieldProperties()
-        hf_params.column_scale = self.terrain.horizontal_scale
-        hf_params.row_scale = self.terrain.horizontal_scale
-        hf_params.vertical_scale = self.terrain.vertical_scale
+        hf_params = gymapi.HeightFieldParams()
+        hf_params.column_scale = self.terrain.cfg.horizontal_scale
+        hf_params.row_scale = self.terrain.cfg.horizontal_scale
+        hf_params.vertical_scale = self.terrain.cfg.vertical_scale
         hf_params.nbRows = self.terrain.tot_cols
         hf_params.nbColumns = self.terrain.tot_rows 
-        hf_params.transform.p.x = -self.terrain.border_size 
-        hf_params.transform.p.y = -self.terrain.border_size
+        hf_params.transform.p.x = -self.terrain.cfg.border_size 
+        hf_params.transform.p.y = -self.terrain.cfg.border_size
         hf_params.transform.p.z = 0.0
         hf_params.static_friction = self.cfg.terrain.static_friction
         hf_params.dynamic_friction = self.cfg.terrain.dynamic_friction
@@ -839,13 +834,6 @@ class LeggedRobot(BaseTask):
         # Penalize torques
         return torch.sum(torch.square(self.torques), dim=1)
 
-    def _reward_torques_smooth(self):
-        return torch.sum(torch.square((self.last_torques - self.torques)), dim=1)
-
-    def _reward_energy(self):
-        return torch.sum(torch.abs((self.torques * self.dof_vel)), dim=1)
-
-
     def _reward_dof_vel(self):
         # Penalize dof velocities
         return torch.sum(torch.square(self.dof_vel), dim=1)
@@ -857,15 +845,7 @@ class LeggedRobot(BaseTask):
     def _reward_action_rate(self):
         # Penalize changes in actions
         return torch.sum(torch.square(self.last_actions - self.actions), dim=1)
-
-    def _reward_action_topos(self):
-        # Penalize changes in actions
-        return torch.sum(
-            torch.square(self.actions * self.action_scale + self.default_dof_pos - self.dof_pos), dim=1)
-
-    def _reward_action_magnitude(self):
-        return torch.sum(torch.square(self.actions), dim=1)
-
+    
     def _reward_collision(self):
         # Penalize collisions on selected bodies
         return torch.sum(1.*(torch.norm(self.contact_forces[:, self.penalised_contact_indices, :], dim=-1) > 0.1), dim=1)
